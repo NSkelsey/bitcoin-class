@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 
 	"github.com/btcsuite/btcec"
 	"github.com/btcsuite/btcjson"
@@ -20,9 +22,9 @@ import (
 
 For this program to execute correctly the following needs to be provided:
 
-tx Outpoint (prevTxHash, vout)
-Value at the Outpoint
-PrivateKey
+A private key
+A receiving address
+The raw json of the funding transaction
 
 The output of the program will be a valid bitcoin transaction encoded as hex
 which can be submitted to any bitcoin client or website that accepts raw hex
@@ -30,21 +32,31 @@ transactions. For example: https://blockchain.info/pushtx
 
 */
 
+var a = flag.String("address", "", "The address to send Bitcoin to")
+var k = flag.String("privkey", "", "The private key of the input tx")
+
+// getArgs parses command line args and asserts that a private key and an
+// address are present and correctly formatted.
 func getArgs() (*btcec.PrivateKey, *btcutil.AddressPubKeyHash) {
-	pkBytes, err := hex.DecodeString("22a47fa09a223f2aa079edf85a7c2d4f87" +
-		"20ee63e502ee2869afab7de234b80c")
+	flag.Parse()
+	if *a == "" || *k == "" {
+		fmt.Println("You must provide a key and an address!")
+		flag.PrintDefaults()
+		os.Exit(0)
+	}
+
+	pkBytes, err := hex.DecodeString(*k)
 	if err != nil {
 		log.Fatal(err)
 	}
 	privKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), pkBytes)
 
-	s := "1DTFjSGeij6woxyaJFaYLMzciKCYP83ZNB"
-	addr, err := btcutil.DecodeAddress(s, &btcnet.MainNetParams)
+	addr, err := btcutil.DecodeAddress(*a, &btcnet.MainNetParams)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	return privKey, addr
+	return privKey, addr.(*btcutil.AddressPubKeyHash)
 }
 
 func readJsonFile(path string) *btcjson.TxRawResult {
@@ -66,20 +78,23 @@ func readJsonFile(path string) *btcjson.TxRawResult {
 	return rawTx
 }
 
+// getFundingParams pulls the relevant transaction information from TxRawResult.
+// To generate a new valid transaction all of the parameters of the TxOut we are
+// spending from must be used.
 func getFundingParams(rawtx *btcjson.TxRawResult) (int64, *btcwire.OutPoint, []byte) {
-	txOut := rawTx.Vout[0]
+	txout := rawtx.Vout[0]
 
-	txHash, err := btcwire.NewShaHashFromStr(rawTx.Txid)
+	hash, err := btcwire.NewShaHashFromStr(rawtx.Txid)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	amnt, err := btcutil.Amount(txOut.Value)
+	amnt, err := btcutil.NewAmount(txout.Value)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	outpoint := btcwire.NewOutPoint(txHash, txOut.N)
+	outpoint := btcwire.NewOutPoint(hash, txout.N)
 
 	subscript, err := hex.DecodeString(txout.ScriptPubKey.Hex)
 	if err != nil {
@@ -96,7 +111,7 @@ func main() {
 	rawFundingTx := readJsonFile("tx.json")
 
 	// Get the parameters we need from the funding transaction
-	inCoin, outpoint, subS := getFundingParams(rawFundingTx)
+	inCoin, outpoint, scriptPubK := getFundingParams(rawFundingTx)
 
 	// Formulate a new transaction from the provided parameters
 	tx := btcwire.NewMsgTx()
@@ -109,14 +124,16 @@ func main() {
 	txout := createTxOut(inCoin, addr)
 	tx.AddTxOut(txout)
 
-	// Generate a signature over the partially complete tx.
-	sig := generateSig(tx, privkey, subS)
+	// Generate a signature over the whole tx.
+	sig := generateSig(tx, privKey, scriptPubK)
 	tx.TxIn[0].SignatureScript = sig
 
 	// Dump the bytes to stdout
 	dumpHex(tx)
 }
 
+// createTxIn pulls the outpoint out of the funding TxOut and uses it as a reference
+// for the txin that will be placed in a new transaction.
 func createTxIn(outpoint *btcwire.OutPoint) *btcwire.TxIn {
 	// The second arg is the txin's signature script, which we are leaving empty
 	// until the entire transaction is ready.
@@ -124,21 +141,30 @@ func createTxIn(outpoint *btcwire.OutPoint) *btcwire.TxIn {
 	return txin
 }
 
-func createTxOut(inCoin int32, addr *btcutil.AddressPubKeyHash) *btcwire.TxOut {
-	txout := btcwire.NewTxOut(inCoin, addr.ScriptAddress())
+// createTxOut generates a TxOut can be added to a transaction. Instead of sending
+// every coin in the txin to the target address, a fee 10,000 Satoshi is set aside.
+// If this fee is left out then, nodes on the network will ignore the transaction,
+// since they would otherwise be providing you a service for free.
+func createTxOut(inCoin int64, addr *btcutil.AddressPubKeyHash) *btcwire.TxOut {
+	// Pay the minimum network fee so that nodes will broadcast the tx.
+	outCoin = inCoin - 10000
+	txout := btcwire.NewTxOut(outCoin, addr.ScriptAddress())
 	return txout
 }
 
-func generateSig(tx *btcwire.MsgTx, privkey *btcec.PrivateKey, subscript []byte) []byte {
+// generateSig requires a transaction, a private key, and the bytes of the raw
+// scriptPubKey. It will then generate a signature over all of the outputs of
+// the provided tx. This is the last step of creating a valid transaction.
+func generateSig(tx *btcwire.MsgTx, privkey *btcec.PrivateKey, scriptPubKey []byte) []byte {
 
-	// The all important signature
+	// The all important signature. Each input is documented below.
 	scriptSig, err := btcscript.SignatureScript(
-		tx,
-		0,
-		subscript,
-		btcscript.SigHashAll,
-		privkey,
-		true,
+		tx,                   // The tx to be signed.
+		0,                    // The index of the txin the signature is for.
+		scriptPubKey,         // The other half of the script from the PubKeyHash.
+		btcscript.SigHashAll, // The signature flags that indicate what the sig covers.
+		privkey,              // The key to generate the signature with.
+		true,                 // The compress sig flag. This saves space on the blockchain.
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -147,6 +173,10 @@ func generateSig(tx *btcwire.MsgTx, privkey *btcec.PrivateKey, subscript []byte)
 	return scriptSig
 }
 
+// dumpHex dumps the raw bytes of a Bitcoin transaction to stdout. This is the
+// format that Bitcoin wire's protocol accepts, so you could connect to a node,
+// send them these bytes, and if the tx was valid, the node would forward the
+// tx through the network.
 func dumpHex(tx *btcwire.MsgTx) {
 	buf := bytes.NewBuffer(make([]byte, 0, tx.SerializeSize()))
 	tx.Serialize(buf)
