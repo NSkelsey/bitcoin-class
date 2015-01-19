@@ -1,4 +1,5 @@
-// Every file in go is a part of some package
+// Every file in go is a part of some package. Since we want to create a program
+// from this file we use 'package main'
 package main
 
 import (
@@ -11,8 +12,8 @@ import (
 	"github.com/btcsuite/btcutil"
 )
 
-// ggenerateKeyPair creates a key pair based on the eliptic curve
-// secp256k1. The key pair returned by this function are two points
+// generateKeyPair creates a key pair based on the eliptic curve
+// secp256k1. The key pair returned by this function is two points
 // on this curve. Bitcoin requires that the public and private keys
 // used to generate signatures are generated using this curve.
 func generateKeyPair() (*btcec.PublicKey, *btcec.PrivateKey) {
@@ -28,9 +29,9 @@ func generateKeyPair() (*btcec.PublicKey, *btcec.PrivateKey) {
 	return priv.PubKey(), priv
 }
 
-// generateAddrs compute the associated bitcon address from the provided
-// public key. To so this, we compute ripemd160(sha256(b)) of the pubkey
-// and then encode the bytes in Bitcoin's address format.
+// generateAddr computes the associated bitcon address from the provided
+// public key. We compute ripemd160(sha256(b)) of the pubkey and then
+// shimmy the hashed bytes into btcsuite's AddressPubKeyHash type
 func generateAddr(pub *btcec.PublicKey) *btcutil.AddressPubKeyHash {
 
 	net := &btcnet.MainNetParams
