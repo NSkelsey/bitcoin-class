@@ -37,7 +37,7 @@ var k = flag.String("privkey", "", "The private key of the input tx")
 
 // getArgs parses command line args and asserts that a private key and an
 // address are present and correctly formatted.
-func getArgs() (*btcec.PrivateKey, *btcutil.AddressPubKeyHash) {
+func getArgs() (*btcec.PrivateKey, btcutil.Address) {
 	flag.Parse()
 	if *a == "" || *k == "" {
 		fmt.Println("You must provide a key and an address!")
@@ -56,7 +56,7 @@ func getArgs() (*btcec.PrivateKey, *btcutil.AddressPubKeyHash) {
 		log.Fatal(err)
 	}
 
-	return privKey, addr.(*btcutil.AddressPubKeyHash)
+	return privKey, addr
 }
 
 func readJsonFile(path string) *btcjson.TxRawResult {
@@ -79,28 +79,32 @@ func readJsonFile(path string) *btcjson.TxRawResult {
 }
 
 // getFundingParams pulls the relevant transaction information from TxRawResult.
-// To generate a new valid transaction all of the parameters of the TxOut we are
-// spending from must be used.
-func getFundingParams(rawtx *btcjson.TxRawResult) (int64, *btcwire.OutPoint, []byte) {
-	txout := rawtx.Vout[0]
+// To generate a new valid transaction we need all of the fields of the txouts we are
+// using along with an OutPoint which is the hash + index of that txout
+func getFundingParams(rawtx *btcjson.TxRawResult) (*btcwire.TxOut, *btcwire.OutPoint) {
+	vout := rawtx.Vout[0]
 
+	// Create the funding TxOut
+	amnt, err := btcutil.NewAmount(vout.Value)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	subscript, err := hex.DecodeString(vout.ScriptPubKey.Hex)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	oldTxOut := btcwire.NewTxOut(int64(amnt), subscript)
+
+	// Create the outpoint to that TxOut.
 	hash, err := btcwire.NewShaHashFromStr(rawtx.Txid)
 	if err != nil {
 		log.Fatal(err)
 	}
+	outpoint := btcwire.NewOutPoint(hash, vout.N)
 
-	amnt, err := btcutil.NewAmount(txout.Value)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	outpoint := btcwire.NewOutPoint(hash, txout.N)
-
-	subscript, err := hex.DecodeString(txout.ScriptPubKey.Hex)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return int64(amnt), outpoint, subscript
+	return oldTxOut, outpoint
 }
 
 func main() {
@@ -111,7 +115,7 @@ func main() {
 	rawFundingTx := readJsonFile("tx.json")
 
 	// Get the parameters we need from the funding transaction
-	inCoin, outpoint, scriptPubK := getFundingParams(rawFundingTx)
+	oldTxOut, outpoint := getFundingParams(rawFundingTx)
 
 	// Formulate a new transaction from the provided parameters
 	tx := btcwire.NewMsgTx()
@@ -121,11 +125,11 @@ func main() {
 	tx.AddTxIn(txin)
 
 	// Create the TxOut
-	txout := createTxOut(inCoin, addr)
+	txout := createTxOut(oldTxOut.Value, addr)
 	tx.AddTxOut(txout)
 
 	// Generate a signature over the whole tx.
-	sig := generateSig(tx, privKey, scriptPubK)
+	sig := generateSig(tx, privKey, oldTxOut.PkScript)
 	tx.TxIn[0].SignatureScript = sig
 
 	// Dump the bytes to stdout
@@ -145,10 +149,15 @@ func createTxIn(outpoint *btcwire.OutPoint) *btcwire.TxIn {
 // every coin in the txin to the target address, a fee 10,000 Satoshi is set aside.
 // If this fee is left out then, nodes on the network will ignore the transaction,
 // since they would otherwise be providing you a service for free.
-func createTxOut(inCoin int64, addr *btcutil.AddressPubKeyHash) *btcwire.TxOut {
+func createTxOut(inCoin int64, addr btcutil.Address) *btcwire.TxOut {
 	// Pay the minimum network fee so that nodes will broadcast the tx.
-	outCoin = inCoin - 10000
-	txout := btcwire.NewTxOut(outCoin, addr.ScriptAddress())
+	outCoin := inCoin - 10000
+	// Take the address and generate a PubKeyScript out of it
+	script, err := btcscript.PayToAddrScript(addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	txout := btcwire.NewTxOut(outCoin, script)
 	return txout
 }
 

@@ -59,7 +59,8 @@ func main() {
 	fmt.Printf("This is your private key in hex\t[%s]\n",
 		hex.EncodeToString(priv.Serialize()))
 
-	// Output the bitcoin address derived from the public key
 	addr := generateAddr(pub)
+
+	// Output the bitcoin address derived from the public key
 	fmt.Printf("The associated Bitcoin address\t[%s]\n", addr.String())
 }
